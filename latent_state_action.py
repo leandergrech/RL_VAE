@@ -1,12 +1,15 @@
 import os
 import numpy as np
+from datetime import datetime as dt
+
 import tensorflow as tf
 from tensorflow.keras.layers import Input
-from tensorflow.keras.models import Model
+from tensorflow.keras.models import Model, save_model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.metrics import Mean
+from tensorflow.keras.callbacks import TensorBoard
 
-from vae_utils import generate_encoder, generate_decoder
+import vae_utils
 from random_env import RandomEnv
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -15,7 +18,7 @@ class Encoder(Model):
     def __init__(self, input_dim, latent_dim, name_prefix, is_variational=True, **kwargs):
         super(Encoder, self).__init__(**kwargs)
 
-        self.encoder = generate_encoder(input_dim=input_dim,
+        self.encoder = vae_utils.generate_encoder(input_dim=input_dim,
                                         latent_dim=latent_dim,
                                         hidden_layers=[64, 64],
                                         name_prefix=name_prefix,
@@ -29,7 +32,7 @@ class Decoder(Model):
     def __init__(self, output_dim, latent_dim, name_prefix, **kwargs):
         super(Decoder, self).__init__(**kwargs)
 
-        self.decoder = generate_decoder(output_dim=output_dim,
+        self.decoder = vae_utils.generate_decoder(output_dim=output_dim,
                                         latent_dim=latent_dim,
                                         hidden_layers=[64, 64],
                                         name_prefix=name_prefix)
@@ -51,22 +54,14 @@ class LatentStateAction(Model):
         self.action_input = Input(shape=(n_act,))
         self.action_output = self.action_decoder(self.action_encoder(self.action_input))
         self.action_ae_model = Model(self.action_input, self.action_output, name='action_ae')
-        # self.action_ae_model.compile(optimizer=Adam(learning_rate=1e-3))
-        # self.action_ae_model.summary()
 
         self.state_input = Input(shape=(n_obs,))
         self.state_output = self.state_decoder(self.state_encoder(self.state_input)[-1])
         self.state_ae_model = Model(self.state_input, self.state_output, name='state_vae')
-        # self.state_ae_model.compile(optimizer=Adam(learning_rate=1e-3))
-        # self.state_ae_model.summary()
 
         self.model = Model(inputs=[self.action_input, self.state_input],
                            outputs=[self.action_output, self.state_output])
-
-        self.compile(optimizer=Adam(learning_rate=1e-3))
-
-        # self.model.summary(line_length=100)
-        # assert False
+        self.compile(optimizer=Adam(learning_rate=1e-2))
 
         # Hyper-parameters
         self.warmup_steps = tf.constant(warmup_steps, dtype=tf.int32)
@@ -96,10 +91,6 @@ class LatentStateAction(Model):
 
             # How good are we at reconstructing state?
             state_reconstruction = self.state_decoder(zs)
-
-            # tf.print(data['obs1'][0])
-            # tf.print(state_reconstruction[0])
-            # tf.print('\n')
             state_reconstruction_loss = tf.reduce_mean(tf.square(data['obs1'] - state_reconstruction))
 
             # How much regularized is our latent state space?
@@ -112,7 +103,7 @@ class LatentStateAction(Model):
                                     false_fn=lambda : 0.0)
 
             # Find state VAE total loss
-            total_state_loss = state_reconstruction_loss + state_kl_loss
+            total_state_loss = state_reconstruction_loss + 4*state_kl_loss
 
             # Get action encoder output
             za = self.action_encoder(data['acts'])
@@ -139,7 +130,7 @@ class LatentStateAction(Model):
         action_grads = tape.gradient(total_action_loss, self.action_ae_model.trainable_weights)
 
         # Apply gradients
-        # self.optimizer.apply_gradients(zip(state_grads, self.state_ae_model.trainable_weights))
+        self.optimizer.apply_gradients(zip(state_grads, self.state_ae_model.trainable_weights))
         self.optimizer.apply_gradients(zip(action_grads, self.action_ae_model.trainable_weights))
 
         # Logging
@@ -153,38 +144,6 @@ class LatentStateAction(Model):
             'state_kl_loss': self.state_kl_loss_tracker.result()
         }
 
-
-def generate_test_data():
-    import os
-    import numpy as np
-    from random_env import RandomEnv
-    from replay_buffer import ReplayBuffer
-
-    rm_name = 'random_env_5x5_reduced_linear_decay.npy'
-    rm = np.load(os.path.join('random_env_rms', rm_name))
-
-    n_obs = 5
-    n_act = 5
-
-    env = RandomEnv(n_obs, n_act, rm, noise_std=0.0)
-
-    replay = ReplayBuffer(obs_dim=n_obs, act_dim=n_act, max_size=int(5e4))
-
-    max_eps = 100
-    max_steps = 50
-
-    for ep_idx  in range(max_eps):
-        o1 = env.reset()
-        for step_idx in range(max_steps):
-            a = env.action_space.sample()
-            o2, r, d, _ = env.step(a)
-
-            replay.store(o1, a, r, o2, d)
-
-            o1 = o2
-
-    replay.save_to_pkl(name=f'buffer_{n_obs}x{n_act}.pkl', directory='data')
-
 def verify_model(model):
     n_obs = 5
     n_act = 5
@@ -192,8 +151,12 @@ def verify_model(model):
     rm = np.load(os.path.join('random_env_rms', 'random_env_5x5_reduced_linear_decay.npy'))
     env = RandomEnv(n_obs, n_act, rm, noise_std=0.0)
 
-    o = env.reset()
-    for _ in range(20):
+    nb_evals = 100
+    action_recon_error = np.empty((nb_evals, n_act))
+    state_recon_error = np.empty((nb_evals, n_obs))
+
+    env.reset()
+    for i in range(nb_evals):
         a = env.action_space.sample()
         o, *_ = env.step(a)
 
@@ -201,39 +164,44 @@ def verify_model(model):
         aa = aa.numpy().flatten()
         oo = oo.numpy().flatten()
 
-        print(f'Actions diff: {a - aa}')
-        print(f'States diff:  {o - oo}')
+        action_recon_error[i] = a - aa
+        state_recon_error[i] = o - oo
+
+    action_error = np.mean(action_recon_error, axis=0)
+    state_error = np.mean(state_recon_error, axis=0)
+
+    rms = lambda x: np.sqrt(np.mean(np.square(x)))
+    print(f'Actions diff: {action_error} - RMS: {rms(action_error)}')
+    print(f'States diff:  {state_error} - RMS: {rms(state_error)}')
+
 
 def train_model():
-    import os
-    from datetime import datetime as dt
     from replay_buffer import ReplayBuffer
 
     n_obs = 5
     n_act = 5
 
-    latent_dim = 10
+    latent_dim = 5
 
-    replay = ReplayBuffer(n_obs, n_act, int(5e4))
-    replay.read_from_pkl(name=f'buffer_{n_obs}x{n_act}.pkl', directory='data')
+    batch_size = 128
+
+
+
+    model_name = f'RLVAE_{dt.now().strftime("%m%d%y-%H%M")}'
+    log_dir = os.path.join('logs', model_name)
+    tensorboard_callback = TensorBoard(log_dir=log_dir, histogram_freq=1)
 
     model = LatentStateAction(n_obs, n_act, latent_dim, warmup_steps=int(1e2))
 
-    def data_gen(b):
-        while True:
-            yield replay.sample_batch(batch_size=b)
+    data = vae_utils.data_gen(batch_size, os.path.join('data', 'buffer_5x5.pkl'))
 
-    data = data_gen(32)
-    model.fit(data, steps_per_epoch=100, epochs=50)
+    model.fit(data, steps_per_epoch=100, epochs=100, callbacks=[tensorboard_callback])
 
-    # save_path = os.path.join('models', f'RLVAE_{n_obs}x{n_act}_latent_{latent_dim}_{dt.strftime(dt.now(), "%m%d%y_%H%M")}.pkl')
-    # with open(save_path, 'wb') as f:
-    #     pkl.dump(model, f)
-    # model.save(save_path)
-    # print(f'Model saved to: {save_path}')
-    print(f'replay buffer called {replay.nb_calls} times')
+    save_model(model, os.path.join('models', model_name))
 
-    verify_model(model)
+    return model
+
 
 if __name__ == '__main__':
-    train_model()
+    model = train_model()
+    verify_model(model)

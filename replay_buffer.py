@@ -8,15 +8,28 @@ class ReplayBuffer:
     A simple FIFO experience replay buffer for NAF_debug agents.
     """
 
-    def __init__(self, obs_dim, act_dim, max_size):
+    def __init__(self, obs_dim=None, act_dim=None, max_size=None):
+        self.obs1_buf = None
+        self.obs2_buf = None
+        self.acts_buf = None
+        self.rews_buf = None
+        self.done_buf = None
+        self.ptr, self.size = 0, 0
+        self.nb_calls = 0
+
+        if obs_dim is not None and act_dim is not None and max_size is not None:
+            self.init_storage(max_size, obs_dim, act_dim)
+        else:
+            print('Buffer initialised without allocated storage')
+
+    def init_storage(self, max_size, obs_dim, act_dim):
         self.obs1_buf = np.empty([max_size, obs_dim], dtype=np.float64)
         self.obs2_buf = np.empty([max_size, obs_dim], dtype=np.float64)
         self.acts_buf = np.empty([max_size, act_dim], dtype=np.float64)
         self.rews_buf = np.empty(max_size, dtype=np.float64)
         self.done_buf = np.empty(max_size, dtype=np.float64)
-        self.ptr, self.size, self.max_size = 0, 0, max_size
 
-        self.nb_calls = 0
+        self.max_size = max_size
 
     def store(self, obs, act, rew, next_obs, done):
         self.obs1_buf[self.ptr] = obs
@@ -59,5 +72,9 @@ class ReplayBuffer:
             buffer_data = pkl.load(f)
 
         obs1s, obs2s, acts, rews, dones = [buffer_data[key] for key in buffer_data]
+        max_size, n_obs = obs1s.shape
+        n_act = acts.shape[-1]
+        self.init_storage(max_size, n_obs, n_act)
+
         for i in range(len(obs1s)):
             self.store(obs1s[i], acts[i], rews[i], obs2s[i], dones[i])
