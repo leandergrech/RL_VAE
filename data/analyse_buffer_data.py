@@ -18,5 +18,4 @@ fig, ax = plt.subplots()
 ax.plot(obs1_rmses)
 plt.show()
 
-with open()
 

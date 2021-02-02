@@ -126,3 +126,25 @@ def data_gen_random_env_obs1(b, buffer_data_name, scale=1.0):
 
     while True:
         yield next(gen)['obs1']*scale
+
+def data_gen_random_env_acts(b, buffer_data_name, scale=1.0):
+    gen = data_gen_random_env(b, buffer_data_name)
+
+    while True:
+        yield next(gen)['acts']*scale
+
+
+def non_random_policy(batch_size, act_dim=5, dep_dim=3):
+    matrix = np.zeros((act_dim, dep_dim))
+    matrix[0, 0] = 1
+    matrix[1, 1] = 1
+    matrix[2, 2] = 1
+    matrix[3, :] = 0.5 * matrix[0, :] + 0.5 * matrix[1, :]
+    matrix[4, :] = 0.5 * matrix[1, :] + 0.25 * matrix[0, :] + 0.25 * matrix[2, :]
+
+    acts = np.zeros((batch_size, act_dim))
+    while True:
+        for i in range(batch_size):
+            # acts[i] = np.clip(np.dot(matrix, np.random.uniform(-1, 1, dep_dim)), -1, 1)
+            acts[i] = np.dot(matrix, np.random.uniform(-1, 1, dep_dim))
+        yield acts
